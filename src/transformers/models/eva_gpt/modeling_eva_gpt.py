@@ -306,6 +306,35 @@ def eager_attention_forward(
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, attn_weights
 
+def sdpa_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs,
+):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    if attention_mask is not None:
+        attention_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+
+    attn_output = F.scaled_dot_product_attention(
+        query,
+        key_states,
+        value_states,
+        attn_mask=attention_mask,
+        dropout_p=dropout if module.training else 0.0,
+        is_causal=False,
+        scale=scaling,
+    )
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    return attn_output, None
+
 
 @use_kernelized_func(apply_rotary_pos_emb)
 class EvaGptAttention(nn.Module):
@@ -360,7 +389,10 @@ class EvaGptAttention(nn.Module):
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
+
+        if self.config._attn_implementation == "sdpa":
+            attention_interface = sdpa_attention_forward
+        elif self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
         attn_output, attn_weights = attention_interface(
