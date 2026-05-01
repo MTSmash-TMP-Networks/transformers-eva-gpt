@@ -464,20 +464,24 @@ class EvaGptPreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["EvaGptDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
+
+    # Attention backends
+    _supports_attention_backend = True
     _supports_flash_attn = True
     _supports_sdpa = True
     _supports_flex_attn = True
 
+    # Compatibility flags for newer/other Transformers versions
+    _supports_flash_attention = True
+    _supports_flex_attention = True
+
     _can_compile_fullgraph = True
-    _supports_attention_backend = True
     _can_record_outputs = {
         "router_logits": OutputRecorder(GptOssTopKRouter, index=0),
         "hidden_states": EvaGptDecoderLayer,
         "attentions": EvaGptAttention,
     }
     _keep_in_fp32_modules = ["post_attention_layernorm", "input_layernorm", "norm"]
-    _supports_flash_attention = False
-    _supports_flex_attention = False
 
     @torch.no_grad()
     def _init_weights(self, module):
