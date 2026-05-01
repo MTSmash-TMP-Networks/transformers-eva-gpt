@@ -316,21 +316,59 @@ def sdpa_attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
+    """
+    SDPA attention path with EvaGPT/GPT-OSS attention-sink correction.
+
+    The eager implementation computes:
+        softmax([QK^T * scale + mask, sink])
+
+    and then drops the sink probability before multiplying with V. This means the
+    probabilities over real tokens do not sum to 1. Standard SDPA cannot represent
+    this directly, because it normalizes only over real key/value tokens.
+
+    To keep SDPA usable, we compute the normal SDPA output and then multiply it by:
+        sum(exp(real_logits)) / (sum(exp(real_logits)) + exp(sink))
+
+    This reproduces the sink denominator behavior while still using SDPA for the
+    value aggregation.
+    """
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
 
     if attention_mask is not None:
         attention_mask = attention_mask[:, :, :, : key_states.shape[-2]]
 
+    dropout_p = dropout if module.training else 0.0
+
+    # Standard normalized SDPA over real tokens.
     attn_output = F.scaled_dot_product_attention(
         query,
         key_states,
         value_states,
         attn_mask=attention_mask,
-        dropout_p=dropout if module.training else 0.0,
+        dropout_p=dropout_p,
         is_causal=False,
         scale=scaling,
     )
+
+    # During training with dropout, exact equivalence to eager with sink correction
+    # is not guaranteed. For inference/eval dropout_p is 0 and this is deterministic.
+    if dropout_p == 0.0:
+        # Compute the logsumexp over the real attention logits so we can add the
+        # sink to the denominator exactly like eager_attention_forward does.
+        attn_logits = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+
+        if attention_mask is not None:
+            attn_logits = attn_logits + attention_mask
+
+        real_logsumexp = torch.logsumexp(attn_logits.float(), dim=-1, keepdim=True)
+
+        sink_logits = module.sinks.reshape(1, -1, 1, 1).to(dtype=torch.float32, device=query.device)
+        combined_logsumexp = torch.logaddexp(real_logsumexp, sink_logits)
+
+        # Probability mass that remains on real tokens after adding the sink token.
+        sink_correction = torch.exp(real_logsumexp - combined_logsumexp).to(attn_output.dtype)
+        attn_output = attn_output * sink_correction
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, None
@@ -395,9 +433,8 @@ class EvaGptAttention(nn.Module):
             attention_interface = eager_attention_forward
 
         elif attn_implementation == "sdpa":
-            # Warning:
-            # This SDPA path does not implement the EvaGPT/GPT-OSS attention sinks.
-            # Use this only if you accept slightly different attention behavior.
+            # SDPA path with EvaGPT/GPT-OSS attention-sink correction.
+            # This is the recommended fallback for GPUs where flash_attention_2 is unavailable, e.g. V100.
             attention_interface = sdpa_attention_forward
 
         else:
