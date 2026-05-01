@@ -297,7 +297,6 @@ def eager_attention_forward(
 
     # This was not in the original implementation and slightly affect results; it prevents overflow in BF16/FP16
     # when training with bsz>1 we clamp max values.
-
     combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
     probs = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
     scores = probs[..., :-1]  # we drop the sink here
@@ -305,6 +304,7 @@ def eager_attention_forward(
     attn_output = torch.matmul(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, attn_weights
+
 
 def sdpa_attention_forward(
     module: nn.Module,
@@ -389,11 +389,21 @@ class EvaGptAttention(nn.Module):
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         attention_interface: Callable = eager_attention_forward
+        attn_implementation = getattr(self.config, "_attn_implementation", "eager")
 
-        if self.config._attn_implementation == "sdpa":
+        if attn_implementation == "eager":
+            attention_interface = eager_attention_forward
+
+        elif attn_implementation == "sdpa":
+            # Warning:
+            # This SDPA path does not implement the EvaGPT/GPT-OSS attention sinks.
+            # Use this only if you accept slightly different attention behavior.
             attention_interface = sdpa_attention_forward
-        elif self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        else:
+            # flash_attention_2, flex_attention, or other registered Transformers backends.
+            # For EvaGPT/GPT-OSS, the backend must support s_aux/sinks to be numerically equivalent to eager.
+            attention_interface = ALL_ATTENTION_FUNCTIONS[attn_implementation]
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -404,7 +414,7 @@ class EvaGptAttention(nn.Module):
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
             sliding_window=self.sliding_window,
-            s_aux=self.sinks,  # diff with Llama
+            s_aux=self.sinks,  # EvaGPT/GPT-OSS attention sinks
             **kwargs,
         )
 
@@ -465,22 +475,27 @@ class EvaGptPreTrainedModel(PreTrainedModel):
     _no_split_modules = ["EvaGptDecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
 
-    # Attention backends
+    # Attention backend support
     _supports_attention_backend = True
+
+    # HuggingFace / Transformers attention backend flags
     _supports_flash_attn = True
     _supports_sdpa = True
     _supports_flex_attn = True
 
-    # Compatibility flags for newer/other Transformers versions
+    # Compatibility flags for newer/other Transformers versions.
+    # Important: these must NOT be False, otherwise flash/flex attention may be blocked.
     _supports_flash_attention = True
     _supports_flex_attention = True
 
     _can_compile_fullgraph = True
+
     _can_record_outputs = {
         "router_logits": OutputRecorder(GptOssTopKRouter, index=0),
         "hidden_states": EvaGptDecoderLayer,
         "attentions": EvaGptAttention,
     }
+
     _keep_in_fp32_modules = ["post_attention_layernorm", "input_layernorm", "norm"]
 
     @torch.no_grad()
