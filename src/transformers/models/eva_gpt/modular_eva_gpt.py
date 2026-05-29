@@ -245,6 +245,56 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
+def sdpa_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs,
+):
+    if kwargs.get("output_attentions", False):
+        logger.warning_once(
+            "`sdpa` attention does not support `output_attentions=True`. Please use `eager` attention instead."
+        )
+
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+    batch_size, num_heads, query_length, _ = query.shape
+    key_length = key_states.shape[-2]
+
+    if attention_mask is None:
+        real_mask = query.new_zeros(batch_size, num_heads, query_length, key_length)
+        if query_length > 1:
+            min_dtype = torch.finfo(query.dtype).min
+            causal_mask = torch.triu(
+                torch.ones(query_length, key_length, dtype=torch.bool, device=query.device),
+                diagonal=key_length - query_length + 1,
+            )
+            real_mask.masked_fill_(causal_mask, min_dtype)
+    else:
+        real_mask = attention_mask[:, :, :, :key_length].expand(batch_size, num_heads, query_length, key_length)
+
+    sink_mask = module.sinks.reshape(1, -1, 1, 1).expand(batch_size, -1, query_length, -1)
+    attn_mask = torch.cat([real_mask, sink_mask], dim=-1)
+    key_states = torch.cat([key_states, torch.zeros_like(key_states[:, :, :1])], dim=-2)
+    value_states = torch.cat([value_states, torch.zeros_like(value_states[:, :, :1])], dim=-2)
+
+    attn_output = torch.nn.functional.scaled_dot_product_attention(
+        query,
+        key_states,
+        value_states,
+        attn_mask=attn_mask,
+        dropout_p=dropout,
+        scale=scaling,
+        is_causal=False,
+    )
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    return attn_output, None
+
+
 class EvaGptAttention(Qwen2Attention):
     def __init__(self, config: EvaGptConfig, layer_idx: int):
         super().__init__(config, layer_idx)
@@ -286,7 +336,9 @@ class EvaGptAttention(Qwen2Attention):
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
+        if self.config._attn_implementation == "sdpa":
+            attention_interface = sdpa_attention_forward
+        elif self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
         attn_output, attn_weights = attention_interface(
@@ -353,7 +405,7 @@ class EvaGptDecoderLayer(LlamaDecoderLayer):
 
 class EvaGptPreTrainedModel(LlamaPreTrainedModel):
     _keep_in_fp32_modules = ["post_attention_layernorm", "input_layernorm", "norm"]
-    _supports_sdpa = False
+    _supports_sdpa = True
     _supports_flash_attention = False
     _supports_flex_attention = False
     _can_record_outputs = {
