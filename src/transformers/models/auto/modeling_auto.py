@@ -1253,7 +1253,7 @@ MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES = OrderedDict(
         ("gpt_neo", "GPTNeoForSequenceClassification"),
         ("gpt_neox", "GPTNeoXForSequenceClassification"),
         ("gpt_oss", "GptOssForSequenceClassification"),
-        („eva_gpt“, „EvaGptForSequenceClassification"),
+        ("eva_gpt", "EvaGptForSequenceClassification"),
         ("gptj", "GPTJForSequenceClassification"),
         ("helium", "HeliumForSequenceClassification"),
         ("hunyuan_v1_dense", "HunYuanDenseV1ForSequenceClassification"),
