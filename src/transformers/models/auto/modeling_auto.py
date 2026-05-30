@@ -1470,7 +1470,7 @@ MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING_NAMES = OrderedDict(
         ("gpt_neo", "GPTNeoForTokenClassification"),
         ("gpt_neox", "GPTNeoXForTokenClassification"),
         ("gpt_oss", "GptOssForTokenClassification"),
-        („eva_gpt“, „EvaGptForTokenClassification"),
+        ("eva_gpt", "EvaGptForTokenClassification"),
         ("helium", "HeliumForTokenClassification"),
         ("ibert", "IBertForTokenClassification"),
         ("layoutlm", "LayoutLMForTokenClassification"),
