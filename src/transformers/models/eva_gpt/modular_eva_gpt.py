@@ -276,6 +276,12 @@ def sdpa_attention_forward(
             real_mask.masked_fill_(causal_mask, min_dtype)
     else:
         real_mask = attention_mask[:, :, :, :key_length].expand(batch_size, num_heads, query_length, key_length)
+        if real_mask.dtype == torch.bool:
+            real_mask = torch.zeros_like(real_mask, dtype=query.dtype).masked_fill_(
+                ~real_mask, torch.finfo(query.dtype).min
+            )
+        else:
+            real_mask = real_mask.to(dtype=query.dtype)
 
     sink_mask = module.sinks.reshape(1, -1, 1, 1).expand(batch_size, -1, query_length, -1)
     attn_mask = torch.cat([real_mask, sink_mask], dim=-1)
